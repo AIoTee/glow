@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/charm"
 	"github.com/charmbracelet/charm/keygen"
 	"github.com/charmbracelet/charm/ui/common"
+	"github.com/charmbracelet/glow/utils"
 	"github.com/muesli/gitcha"
 	te "github.com/muesli/termenv"
 )
@@ -28,15 +29,18 @@ var (
 	config            Config
 	glowLogoTextColor = common.Color("#ECFD65")
 	debug             = false // true if we're logging to a file, in which case we'll log more stuff
-	stashedOnly       = false
 )
 
 // Config contains TUI-specific configuration.
 type Config struct {
-	ShowAllFiles bool
-	Gopath       string `env:"GOPATH"`
-	HomeDir      string `env:"HOME"`
-	StashedOnly  bool
+	ShowAllFiles    bool
+	Gopath          string `env:"GOPATH"`
+	HomeDir         string `env:"HOME"`
+	GlamourMaxWidth uint
+	GlamourStyle    string
+
+	// Which document types shall we show? We work though this with bitmasking.
+	DocumentTypes DocumentType
 
 	// For debugging the UI
 	Logfile              string `env:"GLOW_LOGFILE"`
@@ -45,7 +49,7 @@ type Config struct {
 }
 
 // NewProgram returns a new Tea program.
-func NewProgram(style string, cfg Config) *tea.Program {
+func NewProgram(cfg Config) *tea.Program {
 	if cfg.Logfile != "" {
 		log.Println("-- Starting Glow ----------------")
 		log.Printf("High performance pager: %v", cfg.HighPerformancePager)
@@ -54,10 +58,8 @@ func NewProgram(style string, cfg Config) *tea.Program {
 		debug = true
 	}
 	config = cfg
-	return tea.NewProgram(initialize(cfg, style), update, view)
+	return tea.NewProgram(newModel(cfg))
 }
-
-// MESSAGES
 
 type errMsg struct{ err error }
 type newCharmClientMsg *charm.Client
@@ -84,8 +86,6 @@ func (s stashLoadErrMsg) Error() string { return s.err.Error() }
 func (s stashLoadErrMsg) Unwrap() error { return s.err }
 func (s newsLoadErrMsg) Error() string  { return s.err.Error() }
 func (s newsLoadErrMsg) Unwrap() error  { return s.err }
-
-// MODEL
 
 // Which part of the application something appies to. Occasionally used as an
 // argument to commands and messages.
@@ -135,7 +135,7 @@ const (
 )
 
 type model struct {
-	cfg            Config
+	cfg            *Config
 	cc             *charm.Client
 	authStatus     authStatus
 	keygenState    keygenState
@@ -156,16 +156,22 @@ type model struct {
 // method alters the model we also need to send along any commands returned.
 func (m *model) unloadDocument() []tea.Cmd {
 	m.state = stateShowStash
-	m.stash.state = stashStateReady
 	m.pager.unload()
 	m.pager.showHelp = false
+
+	if m.stash.filterInput.Value() == "" {
+		m.stash.state = stashStateReady
+	} else {
+		m.stash.state = stashStateShowFiltered
+	}
 
 	var batch []tea.Cmd
 	if m.pager.viewport.HighPerformanceRendering {
 		batch = append(batch, tea.ClearScrollArea)
 	}
-	if !m.stash.loaded.done(stashedOnly) || m.stash.loadingFromNetwork {
-		batch = append(batch, spinner.Tick(m.stash.spinner))
+
+	if !m.stash.loadingDone() || m.stash.loadingFromNetwork {
+		batch = append(batch, spinner.Tick)
 	}
 	return batch
 }
@@ -176,52 +182,49 @@ func (m *model) setAuthStatus(as authStatus) {
 	m.pager.authStatus = as
 }
 
-// INIT
-
-func initialize(cfg Config, style string) func() (tea.Model, tea.Cmd) {
-	return func() (tea.Model, tea.Cmd) {
-		if style == "auto" {
-			dbg := te.HasDarkBackground()
-			if dbg {
-				style = "dark"
-			} else {
-				style = "light"
-			}
+func newModel(cfg Config) tea.Model {
+	if cfg.GlamourStyle == "auto" {
+		dbg := te.HasDarkBackground()
+		if dbg {
+			cfg.GlamourStyle = "dark"
+		} else {
+			cfg.GlamourStyle = "light"
 		}
+	}
 
-		stashedOnly = cfg.StashedOnly
+	if cfg.DocumentTypes == 0 {
+		cfg.DocumentTypes = LocalDocuments | StashedDocuments | NewsDocuments
+	}
 
-		m := model{
-			cfg:         cfg,
-			state:       stateShowStash,
-			authStatus:  authConnecting,
-			keygenState: keygenUnstarted,
-		}
-		m.pager = newPagerModel(m.authStatus, style)
-		m.stash = newStashModel(m.authStatus)
-
-		cmds := []tea.Cmd{
-			newCharmClient,
-			spinner.Tick(m.stash.spinner),
-		}
-		if !cfg.StashedOnly {
-			cmds = append(cmds, findLocalFiles(m))
-		}
-
-		return m, tea.Batch(cmds...)
+	as := authConnecting
+	return model{
+		cfg:         &cfg,
+		state:       stateShowStash,
+		authStatus:  as,
+		keygenState: keygenUnstarted,
+		pager:       newPagerModel(&cfg, as),
+		stash:       newStashModel(&cfg, as),
 	}
 }
 
-// UPDATE
+func (m model) Init() tea.Cmd {
+	var cmds []tea.Cmd
 
-func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
-	m, ok := mdl.(model)
-	if !ok {
-		return model{
-			fatalErr: errors.New("could not perform assertion on model in update"),
-		}, tea.Quit
+	if m.cfg.DocumentTypes&StashedDocuments != 0 || m.cfg.DocumentTypes&NewsDocuments != 0 {
+		cmds = append(cmds,
+			newCharmClient,
+			spinner.Tick,
+		)
 	}
 
+	if m.cfg.DocumentTypes&LocalDocuments != 0 {
+		cmds = append(cmds, findLocalFiles(m))
+	}
+
+	return tea.Batch(cmds...)
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If there's been an error, any key exits
 	if m.fatalErr != nil {
 		if _, ok := msg.(tea.KeyMsg); ok {
@@ -237,12 +240,23 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 		case "q", "esc":
 			var cmd tea.Cmd
 
-			// Send these keys through to stash
+			// Send q/esc through to stash
 			switch m.state {
 			case stateShowStash:
 
 				switch m.stash.state {
-				case stashStateSettingNote, stashStatePromptDelete, stashStateShowingError:
+
+				// Send q/esc through in these cases
+				case stashStateSettingNote, stashStatePromptDelete,
+					stashStateShowingError, stashStateFilterNotes,
+					stashStateShowFiltered:
+
+					// If we're fitering, only send esc through so we can clear
+					// the filter results. Q quits as normal.
+					if m.stash.state == stashStateShowFiltered && msg.String() == "q" {
+						return m, tea.Quit
+					}
+
 					m.stash, cmd = stashUpdate(msg, m.stash)
 					return m, cmd
 				}
@@ -253,7 +267,7 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 				// If setting a note send all keys straight through
 				case pagerStateSetNote:
 					var batch []tea.Cmd
-					newPagerModel, cmd := pagerUpdate(msg, m.pager)
+					newPagerModel, cmd := m.pager.Update(msg)
 					m.pager = newPagerModel
 					batch = append(batch, cmd)
 					return m, tea.Batch(batch...)
@@ -300,21 +314,19 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 		// TODO: load more stash pages if we've resized, are on the last page,
 		// and haven't loaded more pages yet.
 
-	// We've started looking for local files
 	case initLocalFileSearchMsg:
 		m.localFileFinder = msg.ch
 		m.cwd = msg.cwd
+		m.stash.cwd = msg.cwd
 		cmds = append(cmds, findNextLocalFile(m))
 
-	// We found a local file
 	case foundLocalFileMsg:
 		newMd := localFileToMarkdown(m.cwd, gitcha.SearchResult(msg))
 		m.stash.addMarkdowns(newMd)
 		cmds = append(cmds, findNextLocalFile(m))
 
 	case sshAuthErrMsg:
-		// If we haven't run the keygen yet, do that
-		if m.keygenState != keygenFinished {
+		if m.keygenState != keygenFinished { // if we haven't run the keygen yet, do that
 			m.keygenState = keygenRunning
 			cmds = append(cmds, generateSSHKeys)
 		} else {
@@ -326,7 +338,7 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 			}
 
 			// Even though it failed, news/stash loading is finished
-			m.stash.loaded |= loadedStash | loadedNews
+			m.stash.loaded |= StashedDocuments | NewsDocuments
 			m.stash.loadingFromNetwork = false
 		}
 
@@ -341,7 +353,7 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 		m.keygenState = keygenFinished
 
 		// Even though it failed, news/stash loading is finished
-		m.stash.loaded |= loadedStash | loadedNews
+		m.stash.loaded |= StashedDocuments | NewsDocuments
 		m.stash.loadingFromNetwork = false
 
 	case keygenSuccessMsg:
@@ -361,13 +373,14 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 
 	case fetchedMarkdownMsg:
 		m.pager.currentDocument = *msg
+		msg.Body = string(utils.RemoveFrontmatter([]byte(msg.Body)))
 		cmds = append(cmds, renderWithGlamour(m.pager, msg.Body))
 
 	case contentRenderedMsg:
 		m.state = stateShowDocument
 
 	case noteSavedMsg:
-		// A note was saved to a document. This will have be done in the
+		// A note was saved to a document. This will have been done in the
 		// pager, so we'll need to find the corresponding note in the stash.
 		// So, pass the message to the stash for processing.
 		stashModel, cmd := stashUpdate(msg, m.stash)
@@ -400,7 +413,7 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case stateShowDocument:
-		newPagerModel, cmd := pagerUpdate(msg, m.pager)
+		newPagerModel, cmd := m.pager.Update(msg)
 		m.pager = newPagerModel
 		cmds = append(cmds, cmd)
 	}
@@ -408,21 +421,14 @@ func update(msg tea.Msg, mdl tea.Model) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// VIEW
-
-func view(mdl tea.Model) string {
-	m, ok := mdl.(model)
-	if !ok {
-		return "could not perform assertion on model in view"
-	}
-
+func (m model) View() string {
 	if m.fatalErr != nil {
 		return errorView(m.fatalErr, true)
 	}
 
 	switch m.state {
 	case stateShowDocument:
-		return pagerView(m.pager)
+		return m.pager.View()
 	default:
 		return stashView(m.stash)
 	}
@@ -660,14 +666,17 @@ func localFileToMarkdown(cwd string, res gitcha.SearchResult) *markdown {
 	md := &markdown{
 		markdownType: localMarkdown,
 		localPath:    res.Path,
-		displayPath:  strings.Replace(res.Path, cwd+"/", "", -1), // strip absolute path
-		Markdown:     charm.Markdown{},
+		Markdown: charm.Markdown{
+			Note:      stripAbsolutePath(res.Path, cwd),
+			CreatedAt: res.Info.ModTime(),
+		},
 	}
 
-	md.Markdown.Note = md.displayPath
-	md.CreatedAt = res.Info.ModTime() // last modified time
-
 	return md
+}
+
+func stripAbsolutePath(fullPath, cwd string) string {
+	return strings.Replace(fullPath, cwd+string(os.PathSeparator), "", -1)
 }
 
 // Lightweight version of reflow's indent function.

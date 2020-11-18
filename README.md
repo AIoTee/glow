@@ -49,6 +49,9 @@ nix-env -iA nixpkgs.glow
 
 # FreeBSD
 pkg install glow
+
+# Windows (with Scoop)
+scoop install glow
 ```
 
 Or download a binary from the [releases][releases] page. MacOS, Linux, Windows,
@@ -68,13 +71,13 @@ go build
 
 ## The TUI
 
-Simply run `glow` without arguments to start the textual user iterface and
-browse local and stashed markdown. Glow will find local markdown files it the
+Simply run `glow` without arguments to start the textual user interface and
+browse local and stashed markdown. Glow will find local markdown files in the
 current directory and below or, if you’re in a Git repository, Glow will search
 the repo.
 
 Markdown files can be read with Glow's high-performance pager. Most of the
-keystokes you know from `less` are the same, but you can press `?` to list
+keystrokes you know from `less` are the same, but you can press `?` to list
 the hotkeys.
 
 ### Stashing
@@ -165,6 +168,25 @@ glow --help
 Check out the [Glamour Style Section](https://github.com/charmbracelet/glamour/blob/master/styles/gallery/README.md)
 to find more styles. Or [make your own](https://github.com/charmbracelet/glamour/tree/master/styles)!
 
+## The Config File
+
+If you find yourself supplying the same flags to `glow` all the time, it's
+probably a good idea to create a config file. Run `glow config`, which will open
+it in your favorite $EDITOR. Alternatively you can manually put a file named
+`glow.yml` in the default config path of you platform. If you're not sure where
+that is, please refer to `glow --help`.
+
+Here's an example config:
+
+```yaml
+# style name or JSON path (default "auto")
+style: "light"
+# show local files only; no network (TUI-mode only)
+local: true
+# word-wrap at width
+width: 80
+```
+
 ## 🔒 Encryption: How It Works
 
 Encryption works by issuing symmetric keys (basically a generated password) and
@@ -184,6 +206,7 @@ machine and not our server, so we never see any unencrypted data.
 
 Part of [Charm](https://charm.sh).
 
-<img alt="the Charm logo" src="https://stuff.charm.sh/charm-badge.jpg" width="400">
+<a href="https://charm.sh/"><img alt="the Charm logo" src="https://stuff.charm.sh/charm-badge.jpg" width="400"></a>
 
 Charm热爱开源! / Charm loves open source!
+

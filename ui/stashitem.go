@@ -2,12 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/charm/ui/common"
 	rw "github.com/mattn/go-runewidth"
-	te "github.com/muesli/termenv"
+	"github.com/muesli/termenv"
+	"github.com/sahilm/fuzzy"
 )
 
 const (
@@ -15,18 +16,6 @@ const (
 	verticalLine         = "│"
 	noMemoTitle          = "No Memo"
 	fileListingStashIcon = "• "
-)
-
-var (
-	greenFg        = te.Style{}.Foreground(common.NewColorPair("#04B575", "#04B575").Color()).Styled
-	fuchsiaFg      = te.Style{}.Foreground(common.Fuschia.Color()).Styled
-	dullFuchsiaFg  = te.Style{}.Foreground(common.NewColorPair("#AD58B4", "#F793FF").Color()).Styled
-	yellowFg       = te.Style{}.Foreground(common.YellowGreen.Color()).Styled                        // renders light green on light backgrounds
-	dullYellowFg   = te.Style{}.Foreground(common.NewColorPair("#9BA92F", "#6BCB94").Color()).Styled // renders light green on light backgrounds
-	subtleIndigoFg = te.Style{}.Foreground(common.NewColorPair("#514DC1", "#7D79F6").Color()).Styled
-	redFg          = te.Style{}.Foreground(common.Red.Color()).Styled
-	faintRedFg     = te.Style{}.Foreground(common.FaintRed.Color()).Styled
-	warmGrayFg     = te.Style{}.Foreground(common.NewColorPair("#979797", "#847A85").Color()).Styled
 )
 
 func stashItemView(b *strings.Builder, m stashModel, index int, md *markdown) {
@@ -55,43 +44,108 @@ func stashItemView(b *strings.Builder, m stashModel, index int, md *markdown) {
 		title = truncate(title, truncateTo)
 	}
 
-	if index == m.index {
+	isSelected := index == m.index
+	isFilteringNotes := m.state == stashStateFilterNotes
+
+	// If there are multiple items being filtered we don't highlight a selected
+	// item in the results. If we've filtered down to one item, however,
+	// highlight that first item since pressing return will open it.
+	singleFilteredItem := m.state == stashStateFilterNotes && len(m.getNotes()) == 1
+
+	if isSelected && !isFilteringNotes || singleFilteredItem {
+		// Selected item
+
 		switch m.state {
 		case stashStatePromptDelete:
-			// Deleting
 			gutter = faintRedFg(verticalLine)
 			icon = faintRedFg(icon)
 			title = redFg(title)
 			date = faintRedFg(date)
 		case stashStateSettingNote:
-			// Setting note
 			gutter = dullYellowFg(verticalLine)
 			icon = ""
-			title = textinput.View(m.noteInput)
+			title = m.noteInput.View()
 			date = dullYellowFg(date)
 		default:
-			// Selected
 			gutter = dullFuchsiaFg(verticalLine)
 			icon = dullFuchsiaFg(icon)
-			title = fuchsiaFg(title)
+			if m.state == stashStateShowFiltered || singleFilteredItem {
+				s := termenv.Style{}.Foreground(common.Fuschia.Color())
+				title = styleFilteredText(title, m.filterInput.Value(), s, s.Underline())
+			} else {
+				title = fuchsiaFg(title)
+			}
 			date = dullFuchsiaFg(date)
 		}
 	} else {
-		// Normal
+		// Regular (non-selected) items
+
 		if md.markdownType == newsMarkdown {
 			gutter = " "
-			title = te.String(title).Foreground(common.Indigo.Color()).String()
-			date = subtleIndigoFg(date)
+
+			if isFilteringNotes && m.filterInput.Value() == "" {
+				title = dimIndigoFg(title)
+				date = dimSubtleIndigoFg(date)
+			} else {
+				s := termenv.Style{}.Foreground(common.Indigo.Color())
+				title = styleFilteredText(title, m.filterInput.Value(), s, s.Underline())
+				date = subtleIndigoFg(date)
+			}
+		} else if isFilteringNotes && m.filterInput.Value() == "" {
+			icon = dimGreenFg(icon)
+			if title == noMemoTitle {
+				title = dimWarmGrayFg(title)
+			} else {
+				title = dimNormalFg(title)
+			}
+			gutter = " "
+			date = dimWarmGrayFg(date)
+
 		} else {
+
 			icon = greenFg(icon)
 			if title == noMemoTitle {
 				title = warmGrayFg(title)
+			} else {
+				s := termenv.Style{}.Foreground(common.NewColorPair("#dddddd", "#1a1a1a").Color())
+				title = styleFilteredText(title, m.filterInput.Value(), s, s.Underline())
 			}
 			gutter = " "
 			date = warmGrayFg(date)
 		}
+
 	}
 
 	fmt.Fprintf(b, "%s %s%s\n", gutter, icon, title)
 	fmt.Fprintf(b, "%s %s", gutter, date)
+}
+
+func styleFilteredText(haystack, needles string, defaultStyle, matchedStyle termenv.Style) string {
+	b := strings.Builder{}
+
+	normalizedHay, err := normalize(haystack)
+	if err != nil && debug {
+		log.Printf("error normalizing '%s': %v", haystack, err)
+	}
+
+	matches := fuzzy.Find(needles, []string{normalizedHay})
+	if len(matches) == 0 {
+		return defaultStyle.Styled(haystack)
+	}
+
+	m := matches[0] // only one match exists
+	for i, rune := range []rune(haystack) {
+		styled := false
+		for _, mi := range m.MatchedIndexes {
+			if i == mi {
+				b.WriteString(matchedStyle.Styled(string(rune)))
+				styled = true
+			}
+		}
+		if !styled {
+			b.WriteString(defaultStyle.Styled(string(rune)))
+		}
+	}
+
+	return b.String()
 }
